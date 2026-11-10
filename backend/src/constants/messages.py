@@ -5,8 +5,14 @@ from src.constants.enums import ConflictStrategy, RunStatus
 
 CONFLICT_STRATEGY_HELP: dict[str, str] = {
     ConflictStrategy.SKIP.value: "目标表已有同键行时跳过，不报错也不覆盖，计入跳过数。",
-    ConflictStrategy.OVERWRITE.value: "目标表已有同键行时整行覆盖，并刷新 _sync_run_id / _synced_at。",
-    ConflictStrategy.REJECT.value: "目标表已有同键行时整行拒绝，写入拒绝记录待人工确认，不覆盖线上数据。",
+    ConflictStrategy.OVERWRITE.value: (
+        "同键时按更新时间归并：只保留最新一版，迟到但更新的行照样补入；"
+        "同版本或更旧的行计入跳过（忽略），旧内容不会盖掉新资料。"
+    ),
+    ConflictStrategy.REJECT.value: (
+        "同键且本行更新时间更新时整行拒绝，写入拒绝记录待人工确认，不覆盖线上数据；"
+        "同版本或更旧的迟到行计入跳过（忽略）。"
+    ),
 }
 
 RUN_STATUS_HINT: dict[str, str] = {

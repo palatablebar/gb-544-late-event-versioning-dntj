@@ -45,7 +45,7 @@ def serialize_run(run: Any, *, pipeline_name: str | None = None, source_type: st
         "rows_triplet": fmt_rows_triplet(run.rows_read, run.rows_written, run.rows_rejected),
         "watermark_from": run.watermark_from,
         "watermark_value": run.watermark_value,
-        "watermark_text": watermark_text(run.watermark_from, run.watermark_value),
+        "watermark_text": watermark_text(run.watermark_from, run.watermark_value, run.rows_written),
         "stage": run.stage,
         "stage_history": run.stage_history or [],
         "error_message": run.error_message,

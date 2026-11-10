@@ -19,15 +19,19 @@ export const formatWatermark = (value: string | number | null | undefined): stri
   return String(value);
 };
 
-export const watermarkLine = (from: string | null, to: string | null): string => {
+export const watermarkLine = (from: string | null, to: string | null, rowsWritten = 0): string => {
   if (formatWatermark(from) === formatWatermark(to)) {
+    // 水位线没动但有写入：说明是迟到补传行按业务键归并进来了
+    if (rowsWritten > 0) {
+      return `水位线停在 ${formatWatermark(to)}（迟到行已按业务键归并）`;
+    }
     return `水位线停在 ${formatWatermark(to)}（本批无新数据）`;
   }
   return `水位线 ${formatWatermark(from)} → ${formatWatermark(to)}`;
 };
 
-export const isNoNewData = (run: Pick<SyncRunBrief, 'rows_read' | 'watermark_from' | 'watermark_value'>): boolean =>
-  run.rows_read === 0 || formatWatermark(run.watermark_from) === formatWatermark(run.watermark_value);
+export const isNoNewData = (run: Pick<SyncRunBrief, 'rows_written' | 'rows_rejected'>): boolean =>
+  run.rows_written === 0 && run.rows_rejected === 0;
 
 export const compareWatermark = (left: string, right: string): number => {
   const kind = watermarkKind(left);

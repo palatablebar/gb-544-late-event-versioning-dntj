@@ -25,9 +25,10 @@ def load_to_target(
     conflict_strategy: str,
     conflict_key: str | None,
     run_id: uuid.UUID,
+    update_column: str | None = None,
 ) -> load_service.LoadOutcome:
     outcome = load_service.insert_rows(
-        schema, table, records, conflict_strategy, conflict_key, run_id
+        schema, table, records, conflict_strategy, conflict_key, run_id, update_column
     )
     logger.info(
         "load done written=%s skipped=%s rejected=%s",

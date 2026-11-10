@@ -93,7 +93,7 @@ export const RunsPage = () => {
             <div className="num text-micro text-dim">开始 {formatTimestamp(activeRun.started_at)}</div>
             <div className="num text-micro text-dim">耗时 {activeRun.duration_text}</div>
             <div className="num text-micro text-dim">
-              {isNoNewData(activeRun) ? '本批无新数据' : watermarkLine(activeRun.watermark_from, activeRun.watermark_value)}
+              {isNoNewData(activeRun) ? '本批无新数据' : watermarkLine(activeRun.watermark_from, activeRun.watermark_value, activeRun.rows_written)}
             </div>
             {activeRun.rows_rejected > 0 && (
               <div className="text-micro" style={{ color: 'var(--color-warn)' }}>

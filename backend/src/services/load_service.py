@@ -1,17 +1,27 @@
-"""写入服务：目标表反射、三种冲突策略真实生效、staging → target 落地。"""
+"""写入服务：目标表反射、三种冲突策略真实生效、staging → target 落地。
+
+迟到数据语义（update_column 生效时）：
+- 批次内同键只留更新时间最新的一版（见 merge_service.dedupe_batch）；
+- 与目标表同键时仅当本行更新时间严格更新才覆盖（见 merge_service.classify_freshness），
+  同版本或更旧的迟到行计入「忽略」，旧内容不会再盖掉新资料。
+"""
 from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import MetaData, Table, create_engine, inspect, select, text
+from sqlalchemy import MetaData, Table, create_engine, inspect, or_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from src.config.settings import settings
 from src.constants import error_codes as codes
 from src.constants.enums import ConflictStrategy
+from src.services import merge_service
 from src.utils.errors import AppError
+from src.utils.logger import get_logger
+
+logger = get_logger("syncmesh.load")
 
 AUDIT_COLUMNS = ("_sync_run_id", "_synced_at")
 
@@ -60,66 +70,41 @@ def parse_conflict_key(conflict_key: str | None) -> list[str]:
     return keys
 
 
-def _dedupe(
-    records: list[dict[str, Any]],
-    key_columns: list[str],
-    strategy: str,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """同批次内重复键处理：overwrite 保留最后一条；skip / reject 保留第一条并产出冲突。"""
-    if not key_columns:
-        return records, []
-    seen: dict[tuple, int] = {}
-    kept: list[dict[str, Any]] = []
-    conflicts: list[dict[str, Any]] = []
-    replace_on_dup = strategy == ConflictStrategy.OVERWRITE.value
-    for record in records:
-        key = tuple(str(record.get(column)) for column in key_columns)
-        if key in seen:
-            if replace_on_dup:
-                kept[seen[key]] = record
-            else:
-                conflicts.append(
-                    {
-                        "reason_code": "conflict_rejected",
-                        "reason_detail": (
-                            f"batch_duplicate conflict_key={'+'.join(key_columns)} value={key}"
-                        ),
-                        "raw_payload": record.get("__raw_payload__", record),
-                        "source_row_index": record.get("__source_row_index__", 0),
-                    }
-                )
-            continue
-        seen[key] = len(kept)
-        kept.append(record)
-    return kept, conflicts
-
-
-def _existing_keys(
+def _existing_states(
     table: Table,
     key_columns: list[str],
     records: list[dict[str, Any]],
-) -> set[tuple]:
-    """把冲突键列 cast 成 text 再比较：目标列可能是 bigint/date，来源是 str。"""
+    update_column: str | None = None,
+) -> dict[tuple, Any]:
+    """预查目标表：{冲突键文本元组: 目标表里的更新时间}（无 update_column 时值统一为 None）。
+
+    把冲突键列 cast 成 text 再比较：目标列可能是 bigint/date，来源是 str。
+    更新时间在 Python 侧做鲜度分类，并作为 ON CONFLICT WHERE 兜底条件的依据。
+    """
     if not key_columns or not records:
-        return set()
+        return {}
     from sqlalchemy import String, cast, tuple_
 
     text_columns = [cast(table.c[name], String) for name in key_columns]
+    select_columns: list[Any] = list(text_columns)
+    if update_column:
+        select_columns.append(table.c[update_column])
     tuples = {
         tuple(str(record.get(column)) for column in key_columns) for record in records
     }
     ordered = list(tuples)
-    found: set[tuple] = set()
+    found: dict[tuple, Any] = {}
     with _reflect_engine.connect() as conn:
         for chunk_start in range(0, len(ordered), 500):
             chunk = ordered[chunk_start : chunk_start + 500]
-            stmt = select(*text_columns)
+            stmt = select(*select_columns)
             if len(key_columns) == 1:
                 stmt = stmt.where(text_columns[0].in_([chunk_value[0] for chunk_value in chunk]))
             else:
                 stmt = stmt.where(tuple_(*text_columns).in_(chunk))
             for row in conn.execute(stmt).all():
-                found.add(tuple(str(value) for value in row))
+                key = tuple(str(value) for value in row[: len(key_columns)])
+                found[key] = row[len(key_columns)] if update_column else None
     return found
 
 
@@ -172,11 +157,18 @@ def insert_rows(
     strategy: str,
     conflict_key: str | None,
     run_id: uuid.UUID,
+    update_column: str | None = None,
 ) -> LoadOutcome:
     """按冲突策略把行写入目标表，自动补 _sync_run_id / _synced_at。
 
+    update_column（业务更新时间列，一般来自管道水位线列的映射）生效时：
+    - 批次内同键只保留更新时间最新的一版；
+    - 目标表已有更新或同等版本的行被忽略（计入 skipped），不再被旧内容覆盖；
+    - ON CONFLICT DO UPDATE 带 WHERE 兜底，并发下也只允许更新的版本覆盖。
+
     计数不依赖 psycopg 的 executemany rowcount（多值 INSERT 时可能是 -1）：
-    先做批次内去重，再按策略预查已存在的冲突键，用集合差得出写入/跳过/拒绝数。
+    先做批次内去重，再预查目标表已存在键与更新时间做鲜度分类，
+    用集合差得出写入/跳过/拒绝数，保证 读取 = 写入 + 忽略 + 拒绝。
     """
     outcome = LoadOutcome()
     if not records:
@@ -191,6 +183,12 @@ def insert_rows(
                 "冲突键列不存在于目标表",
                 f"conflict_key={conflict_key} column={column} missing in {schema}.{table_name}",
             )
+    if update_column and update_column not in table.c:
+        logger.warning(
+            "update_column=%s missing in %s.%s, fallback to arrival order",
+            update_column, schema, table_name,
+        )
+        update_column = None
 
     write_columns = [column for column in table.c.keys() if column in (records[0] or {})]
     write_columns += [column for column in AUDIT_COLUMNS if column in table.c]
@@ -215,17 +213,39 @@ def insert_rows(
             row["__source_row_index__"] = record["__source_row_index__"]
         stamped.append(row)
 
-    # 1) 批次内重复键
-    kept, batch_conflicts = _dedupe(stamped, key_columns, strategy)
+    # 1) 批次内重复键：overwrite 留最新版本（被挤掉的计入忽略），skip/reject 留第一条并产出冲突
+    kept, batch_conflicts, batch_ignored = merge_service.dedupe_batch(
+        stamped, key_columns, strategy, update_column
+    )
     outcome.rejected.extend(batch_conflicts)
+    outcome.skipped += len(batch_ignored)
     if not kept:
         return outcome
 
     insert_stmt = pg_insert(table)
 
-    # 2) 与目标表已存在的键求差
+    # 2) 与目标表已存在的键求差；update_column 生效时先按更新时间做鲜度分类
     if key_columns:
-        existing = _existing_keys(table, key_columns, kept)
+        existing_states = _existing_states(table, key_columns, kept, update_column)
+        if update_column and existing_states:
+            kept, stale = merge_service.classify_freshness(
+                kept, key_columns, update_column, existing_states
+            )
+            if stale:
+                outcome.skipped += len(stale)
+                logger.info(
+                    "stale rows ignored target=%s.%s stale=%s update_column=%s",
+                    schema, table_name, len(stale), update_column,
+                )
+            if not kept:
+                return outcome
+        if existing_states:
+            kept_keys = {
+                tuple(str(row.get(column)) for column in key_columns) for row in kept
+            }
+            existing = {key for key in existing_states if key in kept_keys}
+        else:
+            existing = set()
         if existing:
             survivors: list[dict[str, Any]] = []
             conflicted: list[dict[str, Any]] = []
@@ -248,7 +268,7 @@ def insert_rows(
                     )
                 kept = survivors
             elif strategy == ConflictStrategy.SKIP.value:
-                outcome.skipped = len(conflicted)
+                outcome.skipped += len(conflicted)
                 kept = survivors
 
     if not kept:
@@ -261,7 +281,21 @@ def insert_rows(
     if key_columns and strategy == ConflictStrategy.OVERWRITE.value:
         update_columns = [column for column in clean_rows[0].keys() if column not in key_columns]
         update_map = {column: getattr(insert_stmt.excluded, column) for column in update_columns}
-        insert_stmt = insert_stmt.on_conflict_do_update(index_elements=key_columns, set_=update_map)
+        if update_column:
+            # 并发兜底：只有严格更新的版本（或无法比较时）才允许覆盖目标行
+            insert_stmt = insert_stmt.on_conflict_do_update(
+                index_elements=key_columns,
+                set_=update_map,
+                where=or_(
+                    insert_stmt.excluded[update_column] > table.c[update_column],
+                    insert_stmt.excluded[update_column].is_(None),
+                    table.c[update_column].is_(None),
+                ),
+            )
+        else:
+            insert_stmt = insert_stmt.on_conflict_do_update(
+                index_elements=key_columns, set_=update_map
+            )
         with _reflect_engine.begin() as conn:
             conn.execute(insert_stmt, clean_rows)
         outcome.written = len(clean_rows)

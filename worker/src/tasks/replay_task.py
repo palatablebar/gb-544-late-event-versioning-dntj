@@ -44,6 +44,8 @@ def replay_records(run_id: str, rejected_ids: list[str], actor_id: str = "", act
                 record.reason_detail = (failures[0]["reason_detail"] if failures else record.reason_detail)[:2000]
                 db.commit()
                 continue
+            # 重放是人工逐行确认的动作：不传 update_column，不做鲜度分类，
+            # 按原冲突策略写回；若目标表已有更新版本，overwrite 才会覆盖，skip/reject 维持原语义
             outcome = load.load_to_target(
                 schema=pipeline.target_schema,
                 table=pipeline.target_table,

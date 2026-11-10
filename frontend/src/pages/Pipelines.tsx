@@ -156,7 +156,7 @@ export const PipelinesPage = () => {
                     </td>
                     <td className="num text-micro text-dim">{run.duration_text}</td>
                     <td className="num text-micro text-dim">
-                      {isNoNewData(run) ? '本批无新数据' : watermarkLine(run.watermark_from, run.watermark_value)}
+                      {isNoNewData(run) ? '本批无新数据' : watermarkLine(run.watermark_from, run.watermark_value, run.rows_written)}
                       <Link to={`/runs/${run.id}`} className="ml-3 text-signal">
                         详情
                       </Link>

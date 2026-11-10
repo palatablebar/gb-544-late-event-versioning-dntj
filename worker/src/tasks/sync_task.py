@@ -85,22 +85,25 @@ def _run(db, run: SyncRun, pipeline: SyncPipeline, source: DataSource) -> dict:
     source_columns = [mapping["source_field"] for mapping in mappings]
     rows = extract.read_rows(source.source_type, source.config_json or {}, columns=source_columns)
 
-    kept, filtered, next_watermark = incremental.filter_rows(
+    fresh, late, next_watermark = incremental.filter_rows(
         rows,
         sync_mode=pipeline.sync_mode,
         watermark_column=watermark_column,
         watermark=wm_from,
     )
+    # 迟到补传行不丢弃：与新鲜行一起进入转换，由写入侧按业务键 + 更新时间归并
+    batch = fresh + late
     progress.bump_counters(
         db, run,
-        rows_read=len(kept),
+        rows_read=len(batch),
         watermark_value=None if next_watermark is None else str(next_watermark),
     )
     logger.info(
-        "extract done run=%s rows_read=%s filtered=%s", run.id, len(kept), filtered
+        "extract done run=%s rows_read=%s fresh=%s late=%s",
+        run.id, len(batch), len(fresh), len(late),
     )
 
-    if not kept:
+    if not batch:
         if next_watermark is not None:
             pipeline.last_watermark = str(next_watermark)
         db.commit()
@@ -110,12 +113,13 @@ def _run(db, run: SyncRun, pipeline: SyncPipeline, source: DataSource) -> dict:
         return {"ok": True, "rows_read": 0, "no_new_data": True}
 
     progress.set_stage(db, run, Stage.TRANSFORM.value)
-    mapped_records, transform_failures = transform.transform_batch(kept, mappings)
+    mapped_records, transform_failures = transform.transform_batch(batch, mappings)
     progress.bump_counters(db, run, rows_rejected=len(transform_failures))
 
     progress.set_stage(db, run, Stage.LOAD.value)
     staging_table = storage.prepare_staging(pipeline.id)
     storage.write_staging(pipeline.id, staging_table, mapped_records)
+    update_column = incremental.resolve_update_column(watermark_column, mappings)
     outcome = load.load_to_target(
         schema=pipeline.target_schema,
         table=pipeline.target_table,
@@ -123,6 +127,7 @@ def _run(db, run: SyncRun, pipeline: SyncPipeline, source: DataSource) -> dict:
         conflict_strategy=pipeline.conflict_strategy,
         conflict_key=pipeline.conflict_key,
         run_id=run.id,
+        update_column=update_column,
     )
 
     rejected_items = list(transform_failures) + list(outcome.rejected)
@@ -142,11 +147,12 @@ def _run(db, run: SyncRun, pipeline: SyncPipeline, source: DataSource) -> dict:
     progress.set_stage(db, run, Stage.VERIFY.value)
     staging_rows = storage.count_staging(pipeline.id, staging_table)
     verification = verify.verify_run(
-        rows_read=len(kept),
+        rows_read=len(batch),
         staging_rows=staging_rows,
         written=outcome.written,
         skipped=outcome.skipped,
         rejected=rejected_items,
+        transform_rejected=len(transform_failures),
     )
     status = verify.final_status(len(rejected_items), None)
 
@@ -165,17 +171,19 @@ def _run(db, run: SyncRun, pipeline: SyncPipeline, source: DataSource) -> dict:
     if status == RunStatus.PARTIAL.value:
         logger.info(
             "run partial run=%s read=%s written=%s rejected=%s codes=%s",
-            run.id, len(kept), outcome.written, len(rejected_items), verification["rejected_codes"],
+            run.id, len(batch), outcome.written, len(rejected_items), verification["rejected_codes"],
         )
     else:
         logger.info(
-            "run succeeded run=%s read=%s written=%s", run.id, len(kept), outcome.written
+            "run succeeded run=%s read=%s written=%s skipped=%s",
+            run.id, len(batch), outcome.written, outcome.skipped,
         )
     return {
         "ok": True,
         "status": status,
-        "rows_read": len(kept),
+        "rows_read": len(batch),
         "rows_written": outcome.written,
+        "rows_skipped": outcome.skipped,
         "rows_rejected": len(rejected_items),
         "verification": verification,
     }

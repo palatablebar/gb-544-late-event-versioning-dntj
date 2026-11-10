@@ -60,17 +60,21 @@ def fmt_watermark(value: Any) -> str:
     return str(value)
 
 
-def watermark_text(watermark_from: Any, watermark_value: Any) -> str:
+def watermark_text(watermark_from: Any, watermark_value: Any, rows_written: int = 0) -> str:
     """时间线文案：把两次水位线格式化成『上一水位 → 本批水位』。"""
     frm = fmt_watermark(watermark_from)
     to = fmt_watermark(watermark_value)
     if frm == to:
+        # 水位线没动但有写入：迟到补传行按业务键归并进来了
+        if rows_written:
+            return f"水位线停在 {to}（迟到行已按业务键归并）"
         return f"水位线停在 {to}（本批无新数据）"
     return f"水位线 {frm} → {to}"
 
 
-def is_no_new_data(rows_read: int, watermark_from: Any, watermark_value: Any) -> bool:
-    return rows_read == 0 or str(watermark_from) == str(watermark_value)
+def is_no_new_data(rows_written: int, rows_rejected: int) -> bool:
+    """没写入也没拒绝：本批要么全被忽略（同版本/更旧），要么源为空。"""
+    return rows_written == 0 and rows_rejected == 0
 
 
 def cron_text(expr: str | None) -> str:

@@ -40,7 +40,7 @@ export const RunTimeline = ({ runs, selectedId, onSelect }: Props) => (
           />
           <span className="num w-[70px] text-right text-micro text-dim">{run.duration_text}</span>
           <span className="num w-[190px] truncate text-right text-micro text-dim">
-            {isNoNewData(run) ? '本批无新数据' : watermarkLine(run.watermark_from, run.watermark_value)}
+            {isNoNewData(run) ? '本批无新数据' : watermarkLine(run.watermark_from, run.watermark_value, run.rows_written)}
           </span>
         </button>
       );

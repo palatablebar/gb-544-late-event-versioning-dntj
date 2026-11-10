@@ -1,13 +1,26 @@
 """水位线比较：支持时间戳 / 自增 ID / 字符串三种形态。"""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
+
+_DATETIME_FORMATS = (
+    "%Y-%m-%d %H:%M:%S.%f",
+    "%Y-%m-%dT%H:%M:%S.%f",
+    "%Y-%m-%d %H:%M:%S",
+    "%Y-%m-%dT%H:%M:%S",
+    "%Y-%m-%d",
+    "%Y/%m/%d",
+)
 
 
 def coerce(value: Any) -> Any:
     if value is None:
         return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, date):
+        return datetime(value.year, value.month, value.day)
     if isinstance(value, (int, float)):
         return value
     text = str(value).strip()
@@ -15,8 +28,13 @@ def coerce(value: Any) -> Any:
         return None
     if text.isdigit():
         return int(text)
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d", "%Y/%m/%d"):
+    for fmt in _DATETIME_FORMATS:
         try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            pass
+        try:
+            # 容忍尾部少量杂散字符（如时区后缀）的历史行为
             return datetime.strptime(text[: len(fmt) + 4], fmt)
         except ValueError:
             continue

@@ -9,8 +9,10 @@
 - **四类数据源**：CSV 文件、JSONL 日志、PostgreSQL 表（同实例不同 schema）、内置 Mock REST（`/api/mock/rest/shop_orders`，分页 + 限流 + 偶发 5xx）。
 - **探测**：CSV 探出分隔符/编码/字段清单；PG 表探出列与行数；Mock REST 返回第 1 页样本并提示「共 N 页」；结果写入 `DataSource.status` 与 `last_probed_at`。
 - **映射与七种转换**：`trim` / `upper` / `lower` / `date_format` / `number_cast` / `concat` / `default`，每条映射可选必填、默认值、排序。
-- **全量 / 增量**：增量按管道自己的 `watermark_column` 真实比较并推进水位线，重跑一次即「本批无新数据」。
-- **三种冲突策略**：`skip`（ON CONFLICT DO NOTHING）/ `overwrite`（DO UPDATE）/ `reject`（预查已存在键 + 批次内重复键，拒绝而不覆盖）。
+- **全量 / 增量**：增量按管道自己的 `watermark_column` 真实比较并推进水位线；更新时间早于水位线的**迟到补传行不再被丢弃**，而是随本批一起进入转换，由写入侧按业务键归并。
+- **迟到归并（按更新时间保留最新版）**：每个业务对象（冲突键，如 门店+单品 / 会员）只保留更新时间最新的一版——批次内如此，与目标表比较也如此（`ON CONFLICT ... WHERE excluded.updated_at > target.updated_at` 兜底）；同版本或更旧的迟到行计入「忽略」（`rows_skipped`），旧内容不会再盖掉新资料。
+- **三种冲突策略**：`skip`（ON CONFLICT DO NOTHING）/ `overwrite`（DO UPDATE，仅当本行更新时间严格更新才覆盖）/ `reject`（预查已存在键 + 批次内重复键，拒绝而不覆盖；同版本迟到行计入忽略而非重复拒绝）。
+- **运行对账**：`读取数 = 写入数 + 忽略数 + 拒绝数`，staging 行数 = 写入 + 忽略 + 写入侧拒绝数；同一批数据重跑全部计入忽略、写入为 0，运行幂等且账目始终对平。
 - **部分成功语义**：有拒绝行时 `status=partial`，`error_message` 为空但 `rows_rejected > 0`。
 - **拒绝行与重放**：被拒行带原始载荷与原因码进入 `RejectedRecord`，修完映射后可单条/批量重放，写成功即从拒绝列表消失。
 - **cron 调度**：worker 内同时跑 beat，每 `SCHEDULER_POLL_SECONDS` 扫描到期管道。

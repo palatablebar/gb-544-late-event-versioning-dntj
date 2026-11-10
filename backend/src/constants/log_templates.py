@@ -28,7 +28,7 @@ LOG_TEMPLATES: dict[str, str] = {
     "RUN_STARTED": "run started run={run_id} pipeline={pipeline_id}",
     "RUN_STAGE_CHANGED": "run stage run={run_id} stage={stage}",
     "EXTRACT_START": "extract start run={run_id} source={source_type} watermark_from={watermark_from}",
-    "EXTRACT_DONE": "extract done run={run_id} rows_read={rows_read} filtered_by_watermark={filtered}",
+    "EXTRACT_DONE": "extract done run={run_id} rows_read={rows_read} fresh={fresh} late={late}",
     "TRANSFORM_BATCH": "transform batch run={run_id} batch={batch_index} rows={rows} rejected={rejected}",
     "CONFLICT_HIT": "conflict hit run={run_id} strategy={strategy} keys={keys}",
     "LOAD_BATCH": "load batch run={run_id} batch={batch_index} written={written} skipped={skipped}",

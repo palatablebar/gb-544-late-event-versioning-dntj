@@ -118,7 +118,7 @@ export const RunDetailPage = () => {
           · 跳过 <span className="num">{run.rows_skipped}</span>
         </div>
         <div className="ml-auto px-3 py-2 text-micro text-dim">
-          {isNoNewData(run) ? '本批无新数据' : watermarkLine(run.watermark_from, run.watermark_value)}
+          {isNoNewData(run) ? '本批无新数据' : watermarkLine(run.watermark_from, run.watermark_value, run.rows_written)}
         </div>
       </div>
 
